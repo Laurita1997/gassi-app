@@ -41,8 +41,26 @@ const COLORS = {
   line: "#33513E",
 };
 
-function fmtClock(totalSeconds) {
-  const m = Math.floor(totalSeconds / 60)
+// Straight-line distance between two points, in km (haversine).
+function distanceKm(a, b) {
+  if (!a || !b || a.lat == null || b.lat == null) return null;
+  const R = 6371;
+  const dLat = ((b.lat - a.lat) * Math.PI) / 180;
+  const dLng = ((b.lng - a.lng) * Math.PI) / 180;
+  const lat1 = (a.lat * Math.PI) / 180;
+  const lat2 = (b.lat * Math.PI) / 180;
+  const h =
+    Math.sin(dLat / 2) ** 2 + Math.sin(dLng / 2) ** 2 * Math.cos(lat1) * Math.cos(lat2);
+  return 2 * R * Math.asin(Math.sqrt(h));
+}
+
+function fmtDistance(km) {
+  if (km == null) return null;
+  if (km < 1) return `${Math.round(km * 1000)} m`;
+  return `${km.toFixed(1)} km`;
+}
+
+function fmtClock(totalSeconds) {  const m = Math.floor(totalSeconds / 60)
     .toString()
     .padStart(2, "0");
   const s = Math.floor(totalSeconds % 60)
@@ -77,8 +95,16 @@ function Pulse({ color = COLORS.amber, size = 10 }) {
   );
 }
 
-const DEFAULT_PROFILE = { owner: "Laura", dog: "Katy", breed: "Toy Poodle" };
-const DEMO_USER = { id: "sofia", owner: "Sofia", dog: "Nino", breed: "Mini Poodle", note: "Chill pace, coffee stop halfway" };
+const DEFAULT_PROFILE = { owner: "", dog: "", breed: "", age: "", agreed: false };
+const DEMO_USER = { id: "sofia", owner: "Sofia", dog: "Nino", breed: "Mini Poodle", age: "31", note: "Chill pace, coffee stop halfway" };
+const MIN_AGE = 18;
+const REPORT_REASONS = [
+  "Inappropriate behaviour",
+  "Harassment or threats",
+  "Fake profile",
+  "Unsafe with dogs",
+  "Something else",
+];
 
 export default function Gassi() {
   const [loaded, setLoaded] = useState(false);
@@ -113,6 +139,7 @@ export default function Gassi() {
 
     const saved = localProfile.get();
     if (saved) setProfile(saved);
+    setBlocked(loadBlocked());
 
     (async () => {
       await refreshShared();
@@ -134,6 +161,9 @@ export default function Gassi() {
           dog: w.dog,
           breed: w.breed,
           note: w.note,
+          lat: w.lat,
+          lng: w.lng,
+          live: w.live,
           startedAt: new Date(w.started_at).getTime(),
         };
       });
@@ -170,11 +200,113 @@ export default function Gassi() {
     return () => clearInterval(t);
   }, [isOut, walkStart]);
 
+  const [locationMode, setLocationMode] = useState("pin"); // "pin" or "live"
+  const [coords, setCoords] = useState(null);
+  const [geoError, setGeoError] = useState(null);
+  const [reportingId, setReportingId] = useState(null);
+  const [reportReason, setReportReason] = useState(REPORT_REASONS[0]);
+  const [reportNote, setReportNote] = useState("");
+  const [reportDone, setReportDone] = useState(false);
+  const [blocked, setBlocked] = useState([]);
+  const watchRef = useRef(null);
+
+  // Blocked users are stored on this device — they vanish from your feed immediately.
+  const loadBlocked = () => {
+    try {
+      const raw = localStorage.getItem("gassi:blocked");
+      return raw ? JSON.parse(raw) : [];
+    } catch (e) {
+      return [];
+    }
+  };
+
+  const blockUser = (id) => {
+    const next = Array.from(new Set([...blocked, id]));
+    setBlocked(next);
+    try {
+      localStorage.setItem("gassi:blocked", JSON.stringify(next));
+    } catch (e) {
+      // non-fatal
+    }
+  };
+
+  const submitReport = async () => {
+    if (!reportingId || !viewer) return;
+    const target = activeWalks[reportingId];
+    try {
+      await supabase.from("reports").insert({
+        reporter_id: viewer,
+        reported_id: reportingId,
+        reported_owner: target ? target.owner : null,
+        reason: reportReason,
+        note: reportNote || null,
+      });
+    } catch (e) {
+      // Even if the report fails to send, still block locally so the user is protected now.
+      setSaveError(true);
+    }
+    blockUser(reportingId);
+    setReportDone(true);
+  };
+
+  const closeReport = () => {
+    setReportingId(null);
+    setReportNote("");
+    setReportReason(REPORT_REASONS[0]);
+    setReportDone(false);
+  };
+
+  // Ask the browser for location. Used for both a one-off pin and continuous live tracking.
+  const requestLocation = (mode) =>
+    new Promise((resolve) => {
+      if (!navigator.geolocation) {
+        setGeoError("unsupported");
+        resolve(null);
+        return;
+      }
+      navigator.geolocation.getCurrentPosition(
+        (pos) => {
+          const c = { lat: pos.coords.latitude, lng: pos.coords.longitude };
+          setCoords(c);
+          setGeoError(null);
+          resolve(c);
+        },
+        () => {
+          setGeoError("denied");
+          resolve(null);
+        },
+        { enableHighAccuracy: true, timeout: 8000 }
+      );
+    });
+
+  // While in live mode during a walk, keep pushing position updates to the database.
+  useEffect(() => {
+    if (!isOut || locationMode !== "live" || !viewer) return;
+    if (!navigator.geolocation) return;
+    watchRef.current = navigator.geolocation.watchPosition(
+      async (pos) => {
+        const c = { lat: pos.coords.latitude, lng: pos.coords.longitude };
+        setCoords(c);
+        try {
+          await supabase.from("walks").update({ lat: c.lat, lng: c.lng }).eq("id", viewer);
+        } catch (e) {
+          // transient failure, next update will retry
+        }
+      },
+      () => setGeoError("denied"),
+      { enableHighAccuracy: true }
+    );
+    return () => {
+      if (watchRef.current != null) navigator.geolocation.clearWatch(watchRef.current);
+    };
+  }, [isOut, locationMode, viewer]);
+
   const startWalk = async () => {
     if (!viewer) return;
     const me = myProfileFor(viewer);
     setJustDropped(true);
     setTimeout(() => setJustDropped(false), 1400);
+    const c = await requestLocation(locationMode);
     try {
       const { error } = await supabase.from("walks").upsert({
         id: viewer,
@@ -183,6 +315,9 @@ export default function Gassi() {
         breed: me.breed,
         note: me.note || "Out for a walk",
         started_at: new Date().toISOString(),
+        lat: c ? c.lat : null,
+        lng: c ? c.lng : null,
+        live: locationMode === "live",
       });
       if (error) throw error;
       await refreshShared();
@@ -202,6 +337,8 @@ export default function Gassi() {
   };
 
   const saveProfile = async () => {
+    if (Number(draftProfile.age) < MIN_AGE || !draftProfile.agreed) return;
+    if (!draftProfile.owner || !draftProfile.dog) return;
     setProfile(draftProfile);
     setEditingProfile(false);
     if (!localProfile.set(draftProfile)) setSaveError(true);
@@ -240,13 +377,40 @@ export default function Gassi() {
     }
   };
 
+  // People I accepted, or who accepted me — we're walking together either way.
+  const companions = viewer
+    ? Object.keys(requestsMap)
+        .filter((k) => {
+          const r = requestsMap[k];
+          if (r.status !== "accepted") return false;
+          return k.startsWith(`${viewer}_`) || k.endsWith(`_${viewer}`);
+        })
+        .map((k) => {
+          const r = requestsMap[k];
+          const isMine = k.endsWith(`_${viewer}`);
+          // If I sent it, the other person is the target; if I received it, it's the requester.
+          const otherId = isMine ? k.slice(0, k.length - `_${viewer}`.length) : null;
+          return {
+            key: k,
+            name: isMine && otherId && activeWalks[otherId] ? activeWalks[otherId].owner : r.requesterOwner,
+            dog: isMine && otherId && activeWalks[otherId] ? activeWalks[otherId].dog : r.requesterDog,
+          };
+        })
+    : [];
+
   // Requests sent TO me that are still pending
   const incomingKeys = viewer
     ? Object.keys(requestsMap).filter(
         (k) => k.startsWith(`${viewer}_`) && requestsMap[k].status === "sent"
       )
     : [];
-  const nearbyIds = Object.keys(activeWalks).filter((id) => id !== viewer);
+  const nearbyIds = Object.keys(activeWalks).filter(
+    (id) => id !== viewer && !blocked.includes(id)
+  );
+
+  // Someone must set a name, an age of at least MIN_AGE, and accept the rules before joining in.
+  const profileComplete =
+    Boolean(profile.owner && profile.dog && profile.agreed) && Number(profile.age) >= MIN_AGE;
 
   return (
     <div
@@ -340,7 +504,7 @@ export default function Gassi() {
             }}
           >
             <MapPin size={13} color={COLORS.sky} />
-            {profile.owner} · {profile.dog}
+            {profile.owner ? `${profile.owner} · ${profile.dog}` : "Set up profile"}
           </button>
         </div>
 
@@ -383,13 +547,15 @@ export default function Gassi() {
                 { key: "owner", label: "Your name" },
                 { key: "dog", label: "Dog's name" },
                 { key: "breed", label: "Breed" },
+                { key: "age", label: `Your age (${MIN_AGE}+ only)`, numeric: true },
               ].map((f) => (
                 <div key={f.key} style={{ marginBottom: 12 }}>
                   <label style={{ fontSize: 11, color: COLORS.creamDim, display: "block", marginBottom: 4 }}>
                     {f.label}
                   </label>
                   <input
-                    value={draftProfile[f.key]}
+                    value={draftProfile[f.key] || ""}
+                    inputMode={f.numeric ? "numeric" : "text"}
                     onChange={(e) => setDraftProfile((d) => ({ ...d, [f.key]: e.target.value }))}
                     style={{
                       width: "100%",
@@ -405,6 +571,49 @@ export default function Gassi() {
                   />
                 </div>
               ))}
+
+              {draftProfile.age && Number(draftProfile.age) < MIN_AGE && (
+                <p style={{ fontSize: 11.5, color: COLORS.amber, marginBottom: 10 }}>
+                  Gassi is for {MIN_AGE} and over.
+                </p>
+              )}
+
+              <button
+                onClick={() => setDraftProfile((d) => ({ ...d, agreed: !d.agreed }))}
+                style={{
+                  display: "flex",
+                  gap: 10,
+                  alignItems: "flex-start",
+                  background: "transparent",
+                  border: "none",
+                  padding: 0,
+                  textAlign: "left",
+                  cursor: "pointer",
+                  marginBottom: 14,
+                }}
+              >
+                <span
+                  style={{
+                    width: 20,
+                    height: 20,
+                    borderRadius: 6,
+                    flexShrink: 0,
+                    marginTop: 1,
+                    border: `1px solid ${draftProfile.agreed ? COLORS.amber : COLORS.line}`,
+                    background: draftProfile.agreed ? COLORS.amber : "transparent",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                  }}
+                >
+                  {draftProfile.agreed && <Check size={13} color={COLORS.bg} />}
+                </span>
+                <span style={{ fontSize: 11.5, color: COLORS.creamDim, lineHeight: 1.5 }}>
+                  I'm {MIN_AGE} or older, I'll meet people respectfully, and I understand others can see my
+                  approximate location while I'm out.
+                </span>
+              </button>
+
               <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
                 <button
                   onClick={() => setEditingProfile(false)}
@@ -471,7 +680,7 @@ export default function Gassi() {
                   color: useDemoPhone === demo ? COLORS.bg : COLORS.creamDim,
                 }}
               >
-                {demo ? "Demo phone (Sofia)" : `You (${profile.owner})`}
+                {demo ? "Demo phone (Sofia)" : profile.owner ? `You (${profile.owner})` : "You"}
               </button>
             ))}
           </div>
@@ -508,9 +717,15 @@ export default function Gassi() {
               <PawPrint size={14} color={COLORS.bg} />
             </div>
             <p style={{ fontSize: 12.5, color: COLORS.creamDim }}>
-              <span style={{ color: COLORS.cream, fontWeight: 600 }}>{myProfileFor(viewer).owner}</span> walks{" "}
-              <span style={{ color: COLORS.cream, fontWeight: 600 }}>{myProfileFor(viewer).dog}</span>,{" "}
-              {myProfileFor(viewer).breed}
+              {profileComplete || myProfileFor(viewer).owner ? (
+                <>
+                  <span style={{ color: COLORS.cream, fontWeight: 600 }}>{myProfileFor(viewer).owner}</span>{" "}
+                  walks <span style={{ color: COLORS.cream, fontWeight: 600 }}>{myProfileFor(viewer).dog}</span>
+                  {myProfileFor(viewer).breed ? `, ${myProfileFor(viewer).breed}` : ""}
+                </>
+              ) : (
+                "Tap the top right to add your name, your dog, and your age."
+              )}
             </p>
           </div>
         </div>
@@ -528,13 +743,63 @@ export default function Gassi() {
               }}
             >
               <p className="fredoka" style={{ fontSize: 19, marginBottom: 4 }}>
-                {myProfileFor(viewer).dog} is home
+                {profileComplete ? `${myProfileFor(viewer).dog} is home` : "Set up your profile"}
               </p>
-              <p style={{ fontSize: 13, color: COLORS.creamDim, marginBottom: 22 }}>
-                Drop a pin when you head out — nearby dog owners can ask to join.
+              <p style={{ fontSize: 13, color: COLORS.creamDim, marginBottom: 18 }}>
+                Share where you are so nearby dog owners can ask to join.
               </p>
+
+              {/* Location mode: one-time pin vs continuous live tracking */}
+              <div
+                style={{
+                  display: "flex",
+                  gap: 6,
+                  background: COLORS.bg,
+                  border: `1px solid ${COLORS.line}`,
+                  borderRadius: 12,
+                  padding: 4,
+                  marginBottom: 8,
+                }}
+              >
+                {[
+                  { key: "pin", label: "Drop a pin" },
+                  { key: "live", label: "Live location" },
+                ].map((m) => (
+                  <button
+                    key={m.key}
+                    onClick={() => setLocationMode(m.key)}
+                    className="btn-press"
+                    style={{
+                      flex: 1,
+                      border: "none",
+                      borderRadius: 9,
+                      padding: "9px 0",
+                      fontSize: 12.5,
+                      fontWeight: 600,
+                      cursor: "pointer",
+                      background: locationMode === m.key ? COLORS.sky : "transparent",
+                      color: locationMode === m.key ? COLORS.bg : COLORS.creamDim,
+                    }}
+                  >
+                    {m.label}
+                  </button>
+                ))}
+              </div>
+              <p style={{ fontSize: 11, color: COLORS.muted, marginBottom: 18, lineHeight: 1.5 }}>
+                {locationMode === "pin"
+                  ? "Your position is saved once, when you head out. It won't follow you."
+                  : "Your position updates as you walk, until you end the walk."}
+              </p>
+
               <button
-                onClick={startWalk}
+                onClick={() => {
+                  if (!profileComplete) {
+                    setDraftProfile(profile);
+                    setEditingProfile(true);
+                    return;
+                  }
+                  startWalk();
+                }}
                 className="btn-press"
                 style={{
                   width: "100%",
@@ -574,7 +839,7 @@ export default function Gassi() {
                   className="mono"
                   style={{ fontSize: 11, color: COLORS.amber, letterSpacing: 1, textTransform: "uppercase" }}
                 >
-                  Live · out with {myProfileFor(viewer).dog}
+                  {locationMode === "live" ? "Live location" : "Pinned"} · out with {myProfileFor(viewer).dog}
                 </span>
               </div>
 
@@ -610,7 +875,11 @@ export default function Gassi() {
                     color: COLORS.muted,
                   }}
                 >
-                  Karmeliterplatz area
+                  {geoError === "denied"
+                    ? "Location off — you're visible without a position"
+                    : coords
+                    ? `${coords.lat.toFixed(4)}, ${coords.lng.toFixed(4)}`
+                    : "Getting position…"}
                 </span>
               </div>
 
@@ -647,6 +916,54 @@ export default function Gassi() {
             </div>
           )}
         </div>
+
+        {/* Walking together — visible to BOTH sides once a request is accepted */}
+        {companions.length > 0 && (
+          <div className="fade-in" style={{ padding: "16px 20px 0" }}>
+            <div
+              style={{
+                background: COLORS.surfaceLight,
+                border: `1px solid ${COLORS.amber}`,
+                borderRadius: 18,
+                padding: 16,
+              }}
+            >
+              <p
+                className="mono"
+                style={{
+                  fontSize: 10.5,
+                  color: COLORS.amber,
+                  letterSpacing: 1,
+                  textTransform: "uppercase",
+                  marginBottom: 10,
+                }}
+              >
+                Walking together
+              </p>
+              {companions.map((c) => (
+                <div key={c.key} style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 6 }}>
+                  <div
+                    style={{
+                      width: 32,
+                      height: 32,
+                      borderRadius: "9999px",
+                      background: COLORS.amber,
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      flexShrink: 0,
+                    }}
+                  >
+                    <PawPrint size={15} color={COLORS.bg} />
+                  </div>
+                  <p style={{ fontSize: 13.5 }}>
+                    <span style={{ fontWeight: 600 }}>{c.name}</span> and {c.dog} are joining you
+                  </p>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
 
         {/* Incoming requests - real ones, pulled from shared storage */}
         {isOut && incomingKeys.length > 0 && (
@@ -782,6 +1099,11 @@ export default function Gassi() {
                         <p style={{ fontSize: 12, color: COLORS.creamDim, marginTop: 2 }}>{w.breed}</p>
                         <p className="mono" style={{ fontSize: 10.5, color: COLORS.muted, marginTop: 6 }}>
                           out {mins}m
+                          {(() => {
+                            const d = fmtDistance(distanceKm(coords, w));
+                            return d ? ` · ${d} away` : "";
+                          })()}
+                          {w.live ? " · live" : ""}
                         </p>
                       </div>
                     </div>
@@ -832,12 +1154,168 @@ export default function Gassi() {
                         Coming now, join you <ChevronRight size={13} />
                       </button>
                     )}
+
+                    <button
+                      onClick={() => setReportingId(id)}
+                      style={{
+                        marginTop: 12,
+                        background: "transparent",
+                        border: "none",
+                        padding: 0,
+                        fontSize: 11,
+                        color: COLORS.muted,
+                        textDecoration: "underline",
+                        cursor: "pointer",
+                      }}
+                    >
+                      Report or block
+                    </button>
                   </div>
                 );
               })}
             </div>
           )}
         </div>
+
+        {/* Report / block sheet */}
+        {reportingId && (
+          <div
+            className="fade-in"
+            style={{
+              position: "fixed",
+              inset: 0,
+              background: "rgba(0,0,0,0.6)",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              zIndex: 60,
+              padding: 24,
+            }}
+          >
+            <div
+              style={{
+                width: "100%",
+                maxWidth: 360,
+                background: COLORS.surface,
+                border: `1px solid ${COLORS.line}`,
+                borderRadius: 20,
+                padding: 22,
+              }}
+            >
+              {reportDone ? (
+                <>
+                  <p className="fredoka" style={{ fontSize: 17, marginBottom: 8 }}>
+                    Report sent
+                  </p>
+                  <p style={{ fontSize: 12.5, color: COLORS.creamDim, lineHeight: 1.6, marginBottom: 18 }}>
+                    They've been blocked and won't appear in your feed again. If you feel unsafe right now,
+                    contact local emergency services — this app can't do that for you.
+                  </p>
+                  <button
+                    onClick={closeReport}
+                    className="btn-press"
+                    style={{
+                      width: "100%",
+                      background: COLORS.amber,
+                      border: "none",
+                      color: COLORS.bg,
+                      borderRadius: 12,
+                      padding: "11px 0",
+                      fontWeight: 600,
+                      cursor: "pointer",
+                    }}
+                  >
+                    Done
+                  </button>
+                </>
+              ) : (
+                <>
+                  <p className="fredoka" style={{ fontSize: 17, marginBottom: 4 }}>
+                    Report {activeWalks[reportingId] ? activeWalks[reportingId].owner : "this person"}
+                  </p>
+                  <p style={{ fontSize: 11.5, color: COLORS.creamDim, marginBottom: 16 }}>
+                    They'll be blocked from your feed either way.
+                  </p>
+
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 14 }}>
+                    {REPORT_REASONS.map((r) => (
+                      <button
+                        key={r}
+                        onClick={() => setReportReason(r)}
+                        style={{
+                          textAlign: "left",
+                          background: reportReason === r ? COLORS.surfaceLight : "transparent",
+                          border: `1px solid ${reportReason === r ? COLORS.amberDim : COLORS.line}`,
+                          color: reportReason === r ? COLORS.cream : COLORS.creamDim,
+                          borderRadius: 10,
+                          padding: "10px 12px",
+                          fontSize: 13,
+                          cursor: "pointer",
+                        }}
+                      >
+                        {r}
+                      </button>
+                    ))}
+                  </div>
+
+                  <textarea
+                    value={reportNote}
+                    onChange={(e) => setReportNote(e.target.value)}
+                    placeholder="Anything else we should know? (optional)"
+                    rows={3}
+                    style={{
+                      width: "100%",
+                      background: COLORS.bg,
+                      border: `1px solid ${COLORS.line}`,
+                      borderRadius: 10,
+                      padding: "10px 12px",
+                      color: COLORS.cream,
+                      fontSize: 13,
+                      fontFamily: "'Work Sans', sans-serif",
+                      boxSizing: "border-box",
+                      resize: "none",
+                      marginBottom: 14,
+                    }}
+                  />
+
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <button
+                      onClick={closeReport}
+                      className="btn-press"
+                      style={{
+                        flex: 1,
+                        background: "transparent",
+                        border: `1px solid ${COLORS.line}`,
+                        color: COLORS.creamDim,
+                        borderRadius: 12,
+                        padding: "11px 0",
+                        cursor: "pointer",
+                      }}
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      onClick={submitReport}
+                      className="btn-press"
+                      style={{
+                        flex: 1,
+                        background: COLORS.amber,
+                        border: "none",
+                        color: COLORS.bg,
+                        borderRadius: 12,
+                        padding: "11px 0",
+                        fontWeight: 600,
+                        cursor: "pointer",
+                      }}
+                    >
+                      Report & block
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
