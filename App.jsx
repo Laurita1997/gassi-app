@@ -1,22 +1,30 @@
 import React, { useState, useEffect, useRef } from "react";
 import { PawPrint, MapPin, Clock, Users, X, Check, Navigation, ChevronRight } from "lucide-react";
+import { createClient } from "@supabase/supabase-js";
 
-// Real browser storage, standing in for window.storage (which only exists inside Claude artifacts).
-// Note: "shared" here just means a shared localStorage namespace in THIS browser — it is not
-// synced across devices. Two different phones will each have their own local storage.
-const storage = {
-  async get(key, shared) {
-    const raw = localStorage.getItem((shared ? "shared:" : "priv:") + key);
-    if (raw === null) throw new Error("not found");
-    return { key, value: raw, shared };
+// Real cloud database. The publishable key is safe in frontend code by design.
+const supabase = createClient(
+  "https://tizwkxphvnrndnjcfwls.supabase.co",
+  "sb_publishable_v9td0Bsq7wwc0asb9uqGEQ_5weuDvks"
+);
+
+// Profile stays local to this device — it's just "who am I on this phone".
+const localProfile = {
+  get() {
+    try {
+      const raw = localStorage.getItem("gassi:profile");
+      return raw ? JSON.parse(raw) : null;
+    } catch (e) {
+      return null;
+    }
   },
-  async set(key, value, shared) {
-    localStorage.setItem((shared ? "shared:" : "priv:") + key, value);
-    return { key, value, shared };
-  },
-  async delete(key, shared) {
-    localStorage.removeItem((shared ? "shared:" : "priv:") + key);
-    return { key, deleted: true, shared };
+  set(value) {
+    try {
+      localStorage.setItem("gassi:profile", JSON.stringify(value));
+      return true;
+    } catch (e) {
+      return false;
+    }
   },
 };
 
@@ -77,52 +85,79 @@ export default function Gassi() {
   const [profile, setProfile] = useState(DEFAULT_PROFILE);
   const [editingProfile, setEditingProfile] = useState(false);
   const [draftProfile, setDraftProfile] = useState(DEFAULT_PROFILE);
-  const [viewer, setViewer] = useState("laura"); // "laura" or "sofia" (demo second phone)
-  const [activeWalks, setActiveWalks] = useState({}); // shared: { userId: {owner, dog, breed, startedAt, note} }
-  const [requestsMap, setRequestsMap] = useState({}); // shared: { "targetId_requesterId": {status, requesterOwner, requesterDog} }
+  const [deviceId, setDeviceId] = useState(null);
+  const [useDemoPhone, setUseDemoPhone] = useState(false);
+  const [activeWalks, setActiveWalks] = useState({}); // { userId: {owner, dog, breed, note, startedAt} }
+  const [requestsMap, setRequestsMap] = useState({}); // { "targetId_requesterId": {id, status, requesterOwner, requesterDog} }
   const [justDropped, setJustDropped] = useState(false);
   const [saveError, setSaveError] = useState(false);
   const pollRef = useRef(null);
 
-  const isOut = Boolean(activeWalks[viewer]);
-  const walkStart = activeWalks[viewer]?.startedAt || null;
+  // Each phone gets its own permanent id, so two real devices are two real users.
+  // The demo toggle just adds a second identity on this same phone for solo testing.
+  const viewer = deviceId ? (useDemoPhone ? deviceId + ":demo" : deviceId) : null;
+
+  const isOut = Boolean(viewer && activeWalks[viewer]);
+  const walkStart = viewer && activeWalks[viewer] ? activeWalks[viewer].startedAt : null;
   const [elapsed, setElapsed] = useState(0);
 
-  const myProfileFor = (id) => (id === "laura" ? profile : DEMO_USER);
+  const myProfileFor = (id) => (id && id.endsWith(":demo") ? DEMO_USER : profile);
 
-  // Load persisted profile + shared walks/requests on mount, then poll shared data
-  // so this "phone" picks up changes made from the other viewer, like a real backend would.
   useEffect(() => {
+    let id = localStorage.getItem("gassi:deviceId");
+    if (!id) {
+      id = "u_" + Math.random().toString(36).slice(2, 10);
+      localStorage.setItem("gassi:deviceId", id);
+    }
+    setDeviceId(id);
+
+    const saved = localProfile.get();
+    if (saved) setProfile(saved);
+
     (async () => {
-      try {
-        const p = await storage.get("profile", false);
-        if (p && p.value) setProfile(JSON.parse(p.value));
-      } catch (e) {
-        // no profile saved yet, keep default
-      }
       await refreshShared();
       setLoaded(true);
     })();
-    pollRef.current = setInterval(refreshShared, 2500);
+    pollRef.current = setInterval(refreshShared, 3000);
     return () => clearInterval(pollRef.current);
   }, []);
 
+  // Pull the live state of the world from the database.
   const refreshShared = async () => {
     try {
-      const w = await storage.get("active-walks", true);
-      setActiveWalks(w && w.value ? JSON.parse(w.value) : {});
+      const { data: walks, error: wErr } = await supabase.from("walks").select("*");
+      if (wErr) throw wErr;
+      const walkMap = {};
+      (walks || []).forEach((w) => {
+        walkMap[w.id] = {
+          owner: w.owner,
+          dog: w.dog,
+          breed: w.breed,
+          note: w.note,
+          startedAt: new Date(w.started_at).getTime(),
+        };
+      });
+      setActiveWalks(walkMap);
+
+      const { data: reqs, error: rErr } = await supabase.from("requests").select("*");
+      if (rErr) throw rErr;
+      const reqMap = {};
+      (reqs || []).forEach((r) => {
+        reqMap[`${r.target_id}_${r.requester_id}`] = {
+          id: r.id,
+          status: r.status,
+          requesterOwner: r.requester_owner,
+          requesterDog: r.requester_dog,
+        };
+      });
+      setRequestsMap(reqMap);
+      setSaveError(false);
     } catch (e) {
-      setActiveWalks({});
-    }
-    try {
-      const r = await storage.get("requests", true);
-      setRequestsMap(r && r.value ? JSON.parse(r.value) : {});
-    } catch (e) {
-      setRequestsMap({});
+      setSaveError(true);
     }
   };
 
-  // Tick the timer from the persisted start time
+  // Tick the timer from the stored start time
   useEffect(() => {
     let t;
     if (isOut && walkStart) {
@@ -136,71 +171,81 @@ export default function Gassi() {
   }, [isOut, walkStart]);
 
   const startWalk = async () => {
+    if (!viewer) return;
     const me = myProfileFor(viewer);
-    const startedAt = Date.now();
-    const updated = {
-      ...activeWalks,
-      [viewer]: { owner: me.owner, dog: me.dog, breed: me.breed, note: me.note || "Out for a walk", startedAt },
-    };
-    setActiveWalks(updated);
     setJustDropped(true);
     setTimeout(() => setJustDropped(false), 1400);
     try {
-      const result = await storage.set("active-walks", JSON.stringify(updated), true);
-      if (!result) setSaveError(true);
+      const { error } = await supabase.from("walks").upsert({
+        id: viewer,
+        owner: me.owner,
+        dog: me.dog,
+        breed: me.breed,
+        note: me.note || "Out for a walk",
+        started_at: new Date().toISOString(),
+      });
+      if (error) throw error;
+      await refreshShared();
     } catch (e) {
       setSaveError(true);
     }
   };
 
   const endWalk = async () => {
-    const updated = { ...activeWalks };
-    delete updated[viewer];
-    setActiveWalks(updated);
+    if (!viewer) return;
     try {
-      await storage.set("active-walks", JSON.stringify(updated), true);
+      await supabase.from("walks").delete().eq("id", viewer);
+      await refreshShared();
     } catch (e) {
-      // ignore
+      setSaveError(true);
     }
   };
 
   const saveProfile = async () => {
     setProfile(draftProfile);
     setEditingProfile(false);
-    try {
-      const result = await storage.set("profile", JSON.stringify(draftProfile), false);
-      if (!result) setSaveError(true);
-    } catch (e) {
-      setSaveError(true);
-    }
+    if (!localProfile.set(draftProfile)) setSaveError(true);
   };
 
   const sendRequest = async (targetId) => {
+    if (!viewer) return;
     const me = myProfileFor(viewer);
-    const key = `${targetId}_${viewer}`;
-    const updated = { ...requestsMap, [key]: { status: "sent", requesterOwner: me.owner, requesterDog: me.dog } };
-    setRequestsMap(updated);
     try {
-      await storage.set("requests", JSON.stringify(updated), true);
+      const { error } = await supabase.from("requests").insert({
+        target_id: targetId,
+        requester_id: viewer,
+        requester_owner: me.owner,
+        requester_dog: me.dog,
+        status: "sent",
+      });
+      if (error) throw error;
+      await refreshShared();
     } catch (e) {
       setSaveError(true);
     }
   };
 
   const respondToRequest = async (key, accept) => {
-    const updated = { ...requestsMap, [key]: { ...requestsMap[key], status: accept ? "accepted" : "declined" } };
-    setRequestsMap(updated);
+    const req = requestsMap[key];
+    if (!req) return;
     try {
-      await storage.set("requests", JSON.stringify(updated), true);
+      const { error } = await supabase
+        .from("requests")
+        .update({ status: accept ? "accepted" : "declined" })
+        .eq("id", req.id);
+      if (error) throw error;
+      await refreshShared();
     } catch (e) {
       setSaveError(true);
     }
   };
 
   // Requests sent TO me that are still pending
-  const incomingKeys = Object.keys(requestsMap).filter(
-    (k) => k.startsWith(`${viewer}_`) && requestsMap[k].status === "sent"
-  );
+  const incomingKeys = viewer
+    ? Object.keys(requestsMap).filter(
+        (k) => k.startsWith(`${viewer}_`) && requestsMap[k].status === "sent"
+      )
+    : [];
   const nearbyIds = Object.keys(activeWalks).filter((id) => id !== viewer);
 
   return (
@@ -302,7 +347,7 @@ export default function Gassi() {
         {saveError && (
           <div style={{ padding: "0 20px 10px" }}>
             <p style={{ fontSize: 11.5, color: COLORS.muted }}>
-              Couldn't save just now — your changes will still work for this session.
+              Can't reach the server right now — check your connection.
             </p>
           </div>
         )}
@@ -409,10 +454,10 @@ export default function Gassi() {
               padding: 4,
             }}
           >
-            {["laura", "sofia"].map((id) => (
+            {[false, true].map((demo) => (
               <button
-                key={id}
-                onClick={() => setViewer(id)}
+                key={String(demo)}
+                onClick={() => setUseDemoPhone(demo)}
                 className="btn-press"
                 style={{
                   flex: 1,
@@ -422,16 +467,16 @@ export default function Gassi() {
                   fontSize: 12,
                   fontWeight: 600,
                   cursor: "pointer",
-                  background: viewer === id ? COLORS.amber : "transparent",
-                  color: viewer === id ? COLORS.bg : COLORS.creamDim,
+                  background: useDemoPhone === demo ? COLORS.amber : "transparent",
+                  color: useDemoPhone === demo ? COLORS.bg : COLORS.creamDim,
                 }}
               >
-                {id === "laura" ? `Your phone (${profile.owner})` : "Demo phone (Sofia)"}
+                {demo ? "Demo phone (Sofia)" : `You (${profile.owner})`}
               </button>
             ))}
           </div>
           <p style={{ fontSize: 10.5, color: COLORS.muted, marginTop: 6, textAlign: "center" }}>
-            Switch phones to see requests arrive on the other side, live.
+            Other real phones show up automatically. The demo phone is for testing alone.
           </p>
         </div>
 
@@ -705,8 +750,8 @@ export default function Gassi() {
               }}
             >
               <p style={{ fontSize: 12.5, color: COLORS.creamDim }}>
-                No one else is out right now. Switch to the demo phone above and start a walk as Sofia to see it
-                appear here.
+                No one else is out right now. Send the link to a friend, or switch to the demo phone above to try
+                it yourself.
               </p>
             </div>
           ) : (
