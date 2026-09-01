@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useRef } from "react";
 import { PawPrint, MapPin, Clock, Users, X, Check, Navigation, ChevronRight } from "lucide-react";
 import { createClient } from "@supabase/supabase-js";
+import L from "leaflet";
+import "leaflet/dist/leaflet.css";
 
 // Real cloud database. The publishable key is safe in frontend code by design.
 const supabase = createClient(
@@ -40,6 +42,87 @@ const COLORS = {
   muted: "#6B8577",
   line: "#33513E",
 };
+
+// A real OpenStreetMap view. Free, no API key, no billing account needed.
+function WalkMap({ me, others }) {
+  const nodeRef = useRef(null);
+  const mapRef = useRef(null);
+  const markersRef = useRef([]);
+
+  useEffect(() => {
+    if (!nodeRef.current || mapRef.current) return;
+    const start = me && me.lat != null ? [me.lat, me.lng] : [48.2082, 16.3738]; // Vienna fallback
+    const map = L.map(nodeRef.current, {
+      zoomControl: false,
+      attributionControl: true,
+    }).setView(start, 15);
+    L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", {
+      attribution: "© OpenStreetMap, © CARTO",
+      maxZoom: 19,
+    }).addTo(map);
+    mapRef.current = map;
+    // Leaflet needs a nudge when it starts inside an animating container.
+    setTimeout(() => map.invalidateSize(), 200);
+    return () => {
+      map.remove();
+      mapRef.current = null;
+    };
+  }, []);
+
+  // Redraw markers whenever positions change.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+
+    markersRef.current.forEach((m) => m.remove());
+    markersRef.current = [];
+
+    const dot = (color, size, label) =>
+      L.divIcon({
+        className: "",
+        html: `<div style="width:${size}px;height:${size}px;border-radius:9999px;background:${color};border:2px solid #16241C;box-shadow:0 0 0 2px ${color}55"></div>`,
+        iconSize: [size, size],
+        iconAnchor: [size / 2, size / 2],
+      });
+
+    const points = [];
+
+    if (me && me.lat != null) {
+      const m = L.marker([me.lat, me.lng], { icon: dot("#E8A33D", 18) })
+        .addTo(map)
+        .bindPopup("You");
+      markersRef.current.push(m);
+      points.push([me.lat, me.lng]);
+    }
+
+    others.forEach((o) => {
+      if (o.lat == null) return;
+      const m = L.marker([o.lat, o.lng], { icon: dot("#7FA8B7", 15) })
+        .addTo(map)
+        .bindPopup(`${o.owner} · ${o.dog}`);
+      markersRef.current.push(m);
+      points.push([o.lat, o.lng]);
+    });
+
+    if (points.length > 1) {
+      map.fitBounds(points, { padding: [40, 40], maxZoom: 16 });
+    } else if (points.length === 1) {
+      map.setView(points[0], 15);
+    }
+  }, [me, others]);
+
+  return (
+    <div
+      ref={nodeRef}
+      style={{
+        height: 180,
+        borderRadius: 16,
+        overflow: "hidden",
+        background: "#1B2A20",
+      }}
+    />
+  );
+}
 
 // Straight-line distance between two points, in km (haversine).
 function distanceKm(a, b) {
@@ -449,6 +532,27 @@ export default function Gassi() {
           to { opacity: 1; transform: translateY(0); }
         }
         .btn-press:active { transform: scale(0.97); }
+        .leaflet-container {
+          background: #1B2A20;
+          font-family: 'Work Sans', sans-serif;
+        }
+        .leaflet-control-attribution {
+          background: rgba(22,36,28,0.8) !important;
+          color: #6B8577 !important;
+          font-size: 9px !important;
+        }
+        .leaflet-control-attribution a {
+          color: #7FA8B7 !important;
+        }
+        .leaflet-popup-content-wrapper, .leaflet-popup-tip {
+          background: #28402F;
+          color: #F2EDE1;
+        }
+        .leaflet-popup-content {
+          font-size: 13px;
+          margin: 10px 14px;
+        }
+
         @media (prefers-reduced-motion: reduce) {
           .ripple, .drop-in, .fade-in { animation: none !important; }
         }
@@ -843,45 +947,22 @@ export default function Gassi() {
                 </span>
               </div>
 
-              <div
-                className={justDropped ? "drop-in" : ""}
-                style={{
-                  height: 140,
-                  borderRadius: 16,
-                  background:
-                    "radial-gradient(circle at 50% 45%, #33513E 0%, #223629 60%, #1B2A20 100%)",
-                  position: "relative",
-                  marginBottom: 18,
-                  overflow: "hidden",
-                }}
-              >
-                <div
-                  style={{
-                    position: "absolute",
-                    top: "50%",
-                    left: "50%",
-                    transform: "translate(-50%,-50%)",
-                  }}
-                >
-                  <Pulse size={16} />
-                </div>
-                <span
-                  className="mono"
-                  style={{
-                    position: "absolute",
-                    bottom: 10,
-                    left: 12,
-                    fontSize: 10,
-                    color: COLORS.muted,
-                  }}
-                >
-                  {geoError === "denied"
-                    ? "Location off — you're visible without a position"
-                    : coords
-                    ? `${coords.lat.toFixed(4)}, ${coords.lng.toFixed(4)}`
-                    : "Getting position…"}
-                </span>
+              <div className={justDropped ? "drop-in" : ""} style={{ marginBottom: 10 }}>
+                <WalkMap
+                  me={coords}
+                  others={nearbyIds.map((id) => activeWalks[id]).filter((w) => w && w.lat != null)}
+                />
               </div>
+              <p
+                className="mono"
+                style={{ fontSize: 10, color: COLORS.muted, marginBottom: 18, textAlign: "center" }}
+              >
+                {geoError === "denied"
+                  ? "Location off — you're visible without a position"
+                  : coords
+                  ? `${coords.lat.toFixed(4)}, ${coords.lng.toFixed(4)}`
+                  : "Getting position…"}
+              </p>
 
               <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 18 }}>
                 <div>
