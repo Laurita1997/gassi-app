@@ -219,6 +219,8 @@ function Pulse({ color = COLORS.amber, size = 10 }) {
 const DEFAULT_PROFILE = { owner: "", dog: "", breed: "", age: "", agreed: false };
 const DEMO_USER = { id: "sofia", owner: "Sofia", dog: "Nino", breed: "Mini Poodle", age: "31", note: "Chill pace, coffee stop halfway" };
 const MIN_AGE = 18;
+// Walks auto-expire after 1 hour, so location sharing never runs on unnoticed.
+const MAX_WALK_MS = 60 * 60 * 1000;
 const REPORT_REASONS = [
   "Inappropriate behaviour",
   "Harassment or threats",
@@ -271,8 +273,8 @@ export default function Gassi() {
   }, []);
 
   // Pull the live state of the world from the database.
-  // Walks auto-expire after 3 hours. Someone always forgets to tap "End walk".
-  const MAX_WALK_MS = 3 * 60 * 60 * 1000;
+  // Walks auto-expire after 1 hour. Location sharing shouldn't run on if someone forgets.
+
 
   const refreshShared = async () => {
     try {
@@ -326,6 +328,18 @@ export default function Gassi() {
       setSaveError(true);
     }
   };
+
+  // If my own walk hits the limit, end it properly rather than just hiding it.
+  useEffect(() => {
+    if (!isOut || !walkStart) return;
+    const remaining = MAX_WALK_MS - (Date.now() - walkStart);
+    if (remaining <= 0) {
+      endWalk();
+      return;
+    }
+    const t = setTimeout(() => endWalk(), remaining);
+    return () => clearTimeout(t);
+  }, [isOut, walkStart]);
 
   // Tick the timer from the stored start time
   useEffect(() => {
@@ -1048,10 +1062,23 @@ export default function Gassi() {
                   </p>
                 </div>
                 <div style={{ textAlign: "right" }}>
-                  <p style={{ fontSize: 11, color: COLORS.creamDim, marginBottom: 2 }}>Visible to</p>
-                  <p style={{ fontSize: 14, fontWeight: 500 }}>1.5 km radius</p>
+                  <p style={{ fontSize: 11, color: COLORS.creamDim, marginBottom: 2 }}>Ends automatically in</p>
+                  <p
+                    className="mono"
+                    style={{
+                      fontSize: 14,
+                      fontWeight: 500,
+                      color: MAX_WALK_MS / 1000 - elapsed < 300 ? COLORS.amber : COLORS.cream,
+                    }}
+                  >
+                    {fmtClock(Math.max(0, MAX_WALK_MS / 1000 - elapsed))}
+                  </p>
                 </div>
               </div>
+
+              <p style={{ fontSize: 11, color: COLORS.muted, marginBottom: 14, lineHeight: 1.5 }}>
+                Your walk stops sharing after an hour, even if you forget to end it.
+              </p>
 
               <button
                 onClick={endWalk}
