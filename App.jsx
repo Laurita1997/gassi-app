@@ -68,12 +68,13 @@ async function compressImage(file, max = 256) {
 }
 
 // A small round avatar, falling back to a paw when there's no photo.
-function Avatar({ src, size = 40, ring = "#7FA8B7" }) {
+function Avatar({ src, size = 40, ring = "#7FA8B7", onClick }) {
   if (src) {
     return (
       <img
         src={src}
         alt=""
+        onClick={onClick}
         style={{
           width: size,
           height: size,
@@ -81,12 +82,14 @@ function Avatar({ src, size = 40, ring = "#7FA8B7" }) {
           objectFit: "cover",
           flexShrink: 0,
           border: `2px solid ${ring}`,
+          cursor: onClick ? "pointer" : "default",
         }}
       />
     );
   }
   return (
     <div
+      onClick={onClick}
       style={{
         width: size,
         height: size,
@@ -99,6 +102,54 @@ function Avatar({ src, size = 40, ring = "#7FA8B7" }) {
       }}
     >
       <PawPrint size={size * 0.45} color="#16241C" />
+    </div>
+  );
+}
+
+// Full-screen photo viewer, so you can actually see who you'd be meeting.
+function PhotoViewer({ photos, caption, onClose }) {
+  const shown = photos.filter(Boolean);
+  if (!shown.length) return null;
+  return (
+    <div
+      className="fade-in"
+      onClick={onClose}
+      style={{
+        position: "fixed",
+        inset: 0,
+        background: "rgba(0,0,0,0.9)",
+        zIndex: 4000,
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        justifyContent: "center",
+        padding: 20,
+        gap: 14,
+      }}
+    >
+      <div style={{ display: "flex", gap: 12, flexWrap: "wrap", justifyContent: "center" }}>
+        {shown.map((p, i) => (
+          <img
+            key={i}
+            src={p}
+            alt=""
+            style={{
+              maxWidth: shown.length > 1 ? "45%" : "88%",
+              maxHeight: "60vh",
+              borderRadius: 16,
+              objectFit: "contain",
+            }}
+          />
+        ))}
+      </div>
+      {caption && (
+        <p style={{ color: "#F2EDE1", fontSize: 15, fontWeight: 600, fontFamily: "'Work Sans', sans-serif" }}>
+          {caption}
+        </p>
+      )}
+      <p style={{ color: "#6B8577", fontSize: 12, fontFamily: "'Work Sans', sans-serif" }}>
+        Tap anywhere to close
+      </p>
     </div>
   );
 }
@@ -565,6 +616,7 @@ export default function Gassi() {
   const [geoError, setGeoError] = useState(null);
   const [reportingId, setReportingId] = useState(null);
   const [pickingPin, setPickingPin] = useState(false);
+  const [viewingPhotos, setViewingPhotos] = useState(null);
   const [pickerStart, setPickerStart] = useState(null);
   const [reportReason, setReportReason] = useState(REPORT_REASONS[0]);
   const [reportNote, setReportNote] = useState("");
@@ -1450,10 +1502,31 @@ export default function Gassi() {
                     const rw = activeWalks[requesterId];
                     return (
                       <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
-                        <Avatar src={rw && rw.photo} size={40} ring={COLORS.sky} />
+                        <Avatar
+                          src={rw && rw.photo}
+                          size={40}
+                          ring={COLORS.sky}
+                          onClick={() =>
+                            rw &&
+                            setViewingPhotos({
+                              photos: [rw.photo, rw.dogPhoto],
+                              caption: `${req.requesterOwner} · ${req.requesterDog}`,
+                            })
+                          }
+                        />
                         {rw && rw.dogPhoto && (
                           <div style={{ marginLeft: -14 }}>
-                            <Avatar src={rw.dogPhoto} size={32} ring={COLORS.amber} />
+                            <Avatar
+                              src={rw.dogPhoto}
+                              size={32}
+                              ring={COLORS.amber}
+                              onClick={() =>
+                                setViewingPhotos({
+                                  photos: [rw.photo, rw.dogPhoto],
+                                  caption: `${req.requesterOwner} · ${req.requesterDog}`,
+                                })
+                              }
+                            />
                           </div>
                         )}
                       </div>
@@ -1557,10 +1630,30 @@ export default function Gassi() {
                       </div>
                       <div style={{ display: "flex", gap: 10, flex: 1 }}>
                         <div style={{ display: "flex", gap: -6 }}>
-                          <Avatar src={w.photo} size={44} ring={COLORS.sky} />
+                          <Avatar
+                            src={w.photo}
+                            size={44}
+                            ring={COLORS.sky}
+                            onClick={() =>
+                              setViewingPhotos({
+                                photos: [w.photo, w.dogPhoto],
+                                caption: `${w.owner} · ${w.dog}`,
+                              })
+                            }
+                          />
                           {w.dogPhoto && (
                             <div style={{ marginLeft: -12 }}>
-                              <Avatar src={w.dogPhoto} size={36} ring={COLORS.amber} />
+                              <Avatar
+                                src={w.dogPhoto}
+                                size={36}
+                                ring={COLORS.amber}
+                                onClick={() =>
+                                  setViewingPhotos({
+                                    photos: [w.photo, w.dogPhoto],
+                                    caption: `${w.owner} · ${w.dog}`,
+                                  })
+                                }
+                              />
                             </div>
                           )}
                         </div>
@@ -1649,6 +1742,14 @@ export default function Gassi() {
             </div>
           )}
         </div>
+
+        {viewingPhotos && (
+          <PhotoViewer
+            photos={viewingPhotos.photos}
+            caption={viewingPhotos.caption}
+            onClose={() => setViewingPhotos(null)}
+          />
+        )}
 
         {pickingPin && (
           <PinPicker
