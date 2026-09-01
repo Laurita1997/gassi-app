@@ -467,6 +467,12 @@ function Pulse({ color = COLORS.amber, size = 10 }) {
 const DEFAULT_PROFILE = { owner: "", dog: "", breed: "", age: "", agreed: false, photo: null, dogPhoto: null };
 const DEMO_USER = { id: "sofia", owner: "Sofia", dog: "Nino", breed: "Mini Poodle", age: "31", note: "Chill pace, coffee stop halfway" };
 const MIN_AGE = 18;
+const NOTE_SUGGESTIONS = [
+  "Quick 10-15 min walk",
+  "Long walk, no rush",
+  "Coffee stop on the way",
+  "Just around the block",
+];
 // Walks auto-expire after 1 hour, so location sharing never runs on unnoticed.
 const MAX_WALK_MS = 60 * 60 * 1000;
 const REPORT_REASONS = [
@@ -617,6 +623,7 @@ export default function Gassi() {
   const [reportingId, setReportingId] = useState(null);
   const [pickingPin, setPickingPin] = useState(false);
   const [viewingPhotos, setViewingPhotos] = useState(null);
+  const [walkNote, setWalkNote] = useState("");
   const [pickerStart, setPickerStart] = useState(null);
   const [reportReason, setReportReason] = useState(REPORT_REASONS[0]);
   const [reportNote, setReportNote] = useState("");
@@ -750,7 +757,7 @@ export default function Gassi() {
         owner: me.owner,
         dog: me.dog,
         breed: me.breed,
-        note: me.note || "Out for a walk",
+        note: walkNote.trim() || "Out for a walk",
         started_at: new Date().toISOString(),
         lat: c ? c.lat : null,
         lng: c ? c.lng : null,
@@ -1279,6 +1286,49 @@ export default function Gassi() {
                 Share where you are so nearby dog owners can ask to join.
               </p>
 
+              {/* What kind of walk is this? Helps people decide whether to join. */}
+              <label style={{ fontSize: 11, color: COLORS.creamDim, display: "block", marginBottom: 6 }}>
+                What's the plan?
+              </label>
+              <input
+                value={walkNote}
+                onChange={(e) => setWalkNote(e.target.value.slice(0, 80))}
+                placeholder="e.g. quick 15 min around the park"
+                style={{
+                  width: "100%",
+                  background: COLORS.bg,
+                  border: `1px solid ${COLORS.line}`,
+                  borderRadius: 10,
+                  padding: "11px 12px",
+                  color: COLORS.cream,
+                  fontSize: 13.5,
+                  fontFamily: "'Work Sans', sans-serif",
+                  boxSizing: "border-box",
+                  marginBottom: 8,
+                }}
+              />
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 18 }}>
+                {NOTE_SUGGESTIONS.map((s) => (
+                  <button
+                    key={s}
+                    onClick={() => setWalkNote(s)}
+                    className="btn-press"
+                    style={{
+                      background: walkNote === s ? COLORS.surfaceLight : "transparent",
+                      border: `1px solid ${walkNote === s ? COLORS.amberDim : COLORS.line}`,
+                      color: walkNote === s ? COLORS.amber : COLORS.creamDim,
+                      borderRadius: 20,
+                      padding: "6px 11px",
+                      fontSize: 11.5,
+                      cursor: "pointer",
+                      fontFamily: "'Work Sans', sans-serif",
+                    }}
+                  >
+                    {s}
+                  </button>
+                ))}
+              </div>
+
               {/* Location mode: one-time pin vs continuous live tracking */}
               <div
                 style={{
@@ -1406,6 +1456,8 @@ export default function Gassi() {
               </div>
 
               <p style={{ fontSize: 11, color: COLORS.muted, marginBottom: 14, lineHeight: 1.5 }}>
+                Others see: "{walkNote.trim() || "Out for a walk"}"
+                <br />
                 Your walk stops sharing after an hour, even if you forget to end it.
               </p>
 
