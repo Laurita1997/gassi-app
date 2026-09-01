@@ -864,9 +864,28 @@ export default function Gassi() {
         (k) => k.startsWith(`${viewer}|`) && requestsMap[k].status === "sent"
       )
     : [];
+  // If someone declined me, their walk disappears from my view entirely — no location,
+  // no card. A "no" should actually mean no.
+  const declinedMe = (id) => {
+    const r = requestsMap[`${id}|${viewer}`];
+    return Boolean(r && r.status === "declined");
+  };
+
   const nearbyIds = Object.keys(activeWalks).filter(
-    (id) => id !== viewer && !blocked.includes(id)
+    (id) => id !== viewer && !blocked.includes(id) && !declinedMe(id)
   );
+
+  // Names of people who declined me, so I get told rather than left confused.
+  const declinedBy = viewer
+    ? Object.keys(requestsMap)
+        .filter((k) => k.endsWith(`|${viewer}`) && requestsMap[k].status === "declined")
+        .map((k) => {
+          const id = k.slice(0, k.length - `|${viewer}`.length);
+          const w = activeWalks[id];
+          return w ? w.owner : null;
+        })
+        .filter(Boolean)
+    : [];
 
   // Someone must set a name, an age of at least MIN_AGE, and accept the rules before joining in.
   const profileComplete =
@@ -1642,6 +1661,20 @@ export default function Gassi() {
               Out right now nearby
             </span>
           </div>
+
+          {declinedBy.length > 0 && (
+            <p
+              style={{
+                fontSize: 11.5,
+                color: COLORS.muted,
+                marginBottom: 12,
+                lineHeight: 1.5,
+              }}
+            >
+              {declinedBy.join(", ")} {declinedBy.length > 1 ? "aren't" : "isn't"} up for company right
+              now. Their walk is hidden.
+            </p>
+          )}
 
           {nearbyIds.length === 0 ? (
             <div
