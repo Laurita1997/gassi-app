@@ -53,11 +53,15 @@ function WalkMap({ me, others }) {
     if (!nodeRef.current || mapRef.current) return;
     const start = me && me.lat != null ? [me.lat, me.lng] : [48.2082, 16.3738]; // Vienna fallback
     const map = L.map(nodeRef.current, {
-      zoomControl: false,
+      zoomControl: true,
       attributionControl: true,
-    }).setView(start, 15);
-    L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", {
-      attribution: "© OpenStreetMap, © CARTO",
+      scrollWheelZoom: true,
+      touchZoom: true,
+      doubleClickZoom: true,
+    }).setView(start, 16);
+    // Standard OpenStreetMap tiles — genuinely free, no API key, no watermark.
+    L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      attribution: "© OpenStreetMap contributors",
       maxZoom: 19,
     }).addTo(map);
     mapRef.current = map;
@@ -77,10 +81,10 @@ function WalkMap({ me, others }) {
     markersRef.current.forEach((m) => m.remove());
     markersRef.current = [];
 
-    const dot = (color, size, label) =>
+    const dot = (color, size) =>
       L.divIcon({
         className: "",
-        html: `<div style="width:${size}px;height:${size}px;border-radius:9999px;background:${color};border:2px solid #16241C;box-shadow:0 0 0 2px ${color}55"></div>`,
+        html: `<div style="width:${size}px;height:${size}px;border-radius:9999px;background:${color};border:3px solid #fff;box-shadow:0 2px 6px rgba(0,0,0,0.4)"></div>`,
         iconSize: [size, size],
         iconAnchor: [size / 2, size / 2],
       });
@@ -88,39 +92,73 @@ function WalkMap({ me, others }) {
     const points = [];
 
     if (me && me.lat != null) {
-      const m = L.marker([me.lat, me.lng], { icon: dot("#E8A33D", 18) })
+      const m = L.marker([me.lat, me.lng], { icon: dot("#E8A33D", 20), zIndexOffset: 1000 })
         .addTo(map)
-        .bindPopup("You");
+        .bindTooltip("You", { permanent: true, direction: "top", offset: [0, -14] });
       markersRef.current.push(m);
       points.push([me.lat, me.lng]);
     }
 
     others.forEach((o) => {
       if (o.lat == null) return;
-      const m = L.marker([o.lat, o.lng], { icon: dot("#7FA8B7", 15) })
+      const label = `${o.owner} · ${o.dog}`;
+      const m = L.marker([o.lat, o.lng], { icon: dot("#2F7FA8", 18) })
         .addTo(map)
-        .bindPopup(`${o.owner} · ${o.dog}`);
+        .bindTooltip(label, { permanent: true, direction: "top", offset: [0, -13] });
       markersRef.current.push(m);
       points.push([o.lat, o.lng]);
     });
 
     if (points.length > 1) {
-      map.fitBounds(points, { padding: [40, 40], maxZoom: 16 });
+      map.fitBounds(points, { padding: [50, 50], maxZoom: 17 });
     } else if (points.length === 1) {
-      map.setView(points[0], 15);
+      map.setView(points[0], 16);
     }
   }, [me, others]);
 
+  const recenter = () => {
+    const map = mapRef.current;
+    if (!map) return;
+    const pts = [];
+    if (me && me.lat != null) pts.push([me.lat, me.lng]);
+    others.forEach((o) => o.lat != null && pts.push([o.lat, o.lng]));
+    if (pts.length > 1) map.fitBounds(pts, { padding: [50, 50], maxZoom: 17 });
+    else if (pts.length === 1) map.setView(pts[0], 17);
+  };
+
   return (
-    <div
-      ref={nodeRef}
-      style={{
-        height: 180,
-        borderRadius: 16,
-        overflow: "hidden",
-        background: "#1B2A20",
-      }}
-    />
+    <div style={{ position: "relative" }}>
+      <div
+        ref={nodeRef}
+        style={{
+          height: 260,
+          borderRadius: 16,
+          overflow: "hidden",
+          background: "#1B2A20",
+        }}
+      />
+      <button
+        onClick={recenter}
+        className="btn-press"
+        style={{
+          position: "absolute",
+          right: 10,
+          bottom: 26,
+          zIndex: 500,
+          background: "#16241C",
+          border: "1px solid #33513E",
+          color: "#F2EDE1",
+          borderRadius: 10,
+          padding: "7px 11px",
+          fontSize: 11.5,
+          fontWeight: 600,
+          cursor: "pointer",
+          fontFamily: "'Work Sans', sans-serif",
+        }}
+      >
+        Recenter
+      </button>
+    </div>
   );
 }
 
@@ -537,20 +575,26 @@ export default function Gassi() {
           font-family: 'Work Sans', sans-serif;
         }
         .leaflet-control-attribution {
-          background: rgba(22,36,28,0.8) !important;
-          color: #6B8577 !important;
+          background: rgba(255,255,255,0.8) !important;
           font-size: 9px !important;
         }
-        .leaflet-control-attribution a {
-          color: #7FA8B7 !important;
-        }
-        .leaflet-popup-content-wrapper, .leaflet-popup-tip {
-          background: #28402F;
+        .leaflet-tooltip {
+          background: #16241C;
+          border: 1px solid #33513E;
           color: #F2EDE1;
+          font-size: 11px;
+          font-weight: 600;
+          padding: 3px 7px;
+          border-radius: 7px;
+          box-shadow: 0 2px 6px rgba(0,0,0,0.3);
         }
-        .leaflet-popup-content {
-          font-size: 13px;
-          margin: 10px 14px;
+        .leaflet-tooltip-top:before {
+          border-top-color: #33513E;
+        }
+        .leaflet-control-zoom a {
+          background: #16241C !important;
+          color: #F2EDE1 !important;
+          border-color: #33513E !important;
         }
 
         @media (prefers-reduced-motion: reduce) {
