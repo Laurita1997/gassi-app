@@ -271,12 +271,21 @@ export default function Gassi() {
   }, []);
 
   // Pull the live state of the world from the database.
+  // Walks auto-expire after 3 hours. Someone always forgets to tap "End walk".
+  const MAX_WALK_MS = 3 * 60 * 60 * 1000;
+
   const refreshShared = async () => {
     try {
       const { data: walks, error: wErr } = await supabase.from("walks").select("*");
       if (wErr) throw wErr;
       const walkMap = {};
+      const stale = [];
       (walks || []).forEach((w) => {
+        const startedAt = new Date(w.started_at).getTime();
+        if (Date.now() - startedAt > MAX_WALK_MS) {
+          stale.push(w.id);
+          return;
+        }
         walkMap[w.id] = {
           owner: w.owner,
           dog: w.dog,
@@ -285,10 +294,20 @@ export default function Gassi() {
           lat: w.lat,
           lng: w.lng,
           live: w.live,
-          startedAt: new Date(w.started_at).getTime(),
+          startedAt,
         };
       });
       setActiveWalks(walkMap);
+
+      // Tidy up anything that timed out, so it stops showing for everyone.
+      if (stale.length) {
+        supabase
+          .from("walks")
+          .delete()
+          .in("id", stale)
+          .then(() => {})
+          .catch(() => {});
+      }
 
       const { data: reqs, error: rErr } = await supabase.from("requests").select("*");
       if (rErr) throw rErr;
@@ -450,7 +469,10 @@ export default function Gassi() {
   const endWalk = async () => {
     if (!viewer) return;
     try {
+      // Clear the walk AND any requests tied to it, so nothing lingers as stale state.
       await supabase.from("walks").delete().eq("id", viewer);
+      await supabase.from("requests").delete().eq("target_id", viewer);
+      await supabase.from("requests").delete().eq("requester_id", viewer);
       await refreshShared();
     } catch (e) {
       setSaveError(true);
@@ -498,23 +520,33 @@ export default function Gassi() {
     }
   };
 
-  // People I accepted, or who accepted me — we're walking together either way.
+  // People walking with me right now. Both sides must still be out for this to count.
   const companions = viewer
     ? Object.keys(requestsMap)
         .filter((k) => {
           const r = requestsMap[k];
           if (r.status !== "accepted") return false;
-          return k.startsWith(`${viewer}_`) || k.endsWith(`_${viewer}`);
+          const iAmTarget = k.startsWith(`${viewer}_`);
+          const iAmRequester = k.endsWith(`_${viewer}`);
+          if (!iAmTarget && !iAmRequester) return false;
+
+          // Work out who the other person is, and only show them if they're still out.
+          const otherId = iAmTarget
+            ? k.slice(`${viewer}_`.length)
+            : k.slice(0, k.length - `_${viewer}`.length);
+          return Boolean(activeWalks[viewer]) && Boolean(activeWalks[otherId]);
         })
         .map((k) => {
           const r = requestsMap[k];
-          const isMine = k.endsWith(`_${viewer}`);
-          // If I sent it, the other person is the target; if I received it, it's the requester.
-          const otherId = isMine ? k.slice(0, k.length - `_${viewer}`.length) : null;
+          const iAmTarget = k.startsWith(`${viewer}_`);
+          const otherId = iAmTarget
+            ? k.slice(`${viewer}_`.length)
+            : k.slice(0, k.length - `_${viewer}`.length);
+          const other = activeWalks[otherId];
           return {
             key: k,
-            name: isMine && otherId && activeWalks[otherId] ? activeWalks[otherId].owner : r.requesterOwner,
-            dog: isMine && otherId && activeWalks[otherId] ? activeWalks[otherId].dog : r.requesterDog,
+            name: other ? other.owner : r.requesterOwner,
+            dog: other ? other.dog : r.requesterDog,
           };
         })
     : [];
@@ -1203,6 +1235,7 @@ export default function Gassi() {
                 const reqKey = `${id}_${viewer}`;
                 const status = requestsMap[reqKey]?.status;
                 const mins = Math.max(1, Math.floor((Date.now() - w.startedAt) / 60000));
+                const outLabel = mins >= 60 ? `${Math.floor(mins / 60)}h ${mins % 60}m` : `${mins}m`;
                 return (
                   <div
                     key={id}
@@ -1223,7 +1256,7 @@ export default function Gassi() {
                         </p>
                         <p style={{ fontSize: 12, color: COLORS.creamDim, marginTop: 2 }}>{w.breed}</p>
                         <p className="mono" style={{ fontSize: 10.5, color: COLORS.muted, marginTop: 6 }}>
-                          out {mins}m
+                          out {outLabel}
                           {(() => {
                             const d = fmtDistance(distanceKm(coords, w));
                             return d ? ` · ${d} away` : "";
