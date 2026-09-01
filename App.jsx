@@ -43,6 +43,143 @@ const COLORS = {
   line: "#33513E",
 };
 
+// A map you tap to place your own pin, instead of broadcasting exact GPS.
+function PinPicker({ initial, onConfirm, onCancel }) {
+  const nodeRef = useRef(null);
+  const mapRef = useRef(null);
+  const markerRef = useRef(null);
+  const [picked, setPicked] = useState(initial || null);
+
+  useEffect(() => {
+    if (!nodeRef.current || mapRef.current) return;
+    const start = initial && initial.lat != null ? [initial.lat, initial.lng] : [48.2082, 16.3738];
+    const map = L.map(nodeRef.current, { zoomControl: true }).setView(start, 16);
+    L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      attribution: "© OpenStreetMap contributors",
+      maxZoom: 19,
+    }).addTo(map);
+    mapRef.current = map;
+    setTimeout(() => map.invalidateSize(), 150);
+
+    const icon = L.divIcon({
+      className: "",
+      html: `<div style="width:22px;height:22px;border-radius:9999px;background:#E8A33D;border:3px solid #fff;box-shadow:0 2px 6px rgba(0,0,0,0.4)"></div>`,
+      iconSize: [22, 22],
+      iconAnchor: [11, 11],
+    });
+
+    if (initial && initial.lat != null) {
+      markerRef.current = L.marker(start, { icon, draggable: true }).addTo(map);
+      markerRef.current.on("dragend", (e) => {
+        const p = e.target.getLatLng();
+        setPicked({ lat: p.lat, lng: p.lng });
+      });
+    }
+
+    map.on("click", (e) => {
+      const p = { lat: e.latlng.lat, lng: e.latlng.lng };
+      setPicked(p);
+      if (markerRef.current) {
+        markerRef.current.setLatLng(e.latlng);
+      } else {
+        markerRef.current = L.marker(e.latlng, { icon, draggable: true }).addTo(map);
+        markerRef.current.on("dragend", (ev) => {
+          const q = ev.target.getLatLng();
+          setPicked({ lat: q.lat, lng: q.lng });
+        });
+      }
+    });
+
+    return () => {
+      map.remove();
+      mapRef.current = null;
+    };
+  }, []);
+
+  return (
+    <div
+      className="fade-in"
+      style={{
+        position: "fixed",
+        inset: 0,
+        background: "rgba(0,0,0,0.65)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        zIndex: 70,
+        padding: 18,
+      }}
+    >
+      <div
+        style={{
+          width: "100%",
+          maxWidth: 380,
+          background: "#1F3327",
+          border: "1px solid #33513E",
+          borderRadius: 20,
+          padding: 18,
+        }}
+      >
+        <p className="fredoka" style={{ fontSize: 17, marginBottom: 4, color: "#F2EDE1" }}>
+          Where should your pin go?
+        </p>
+        <p style={{ fontSize: 11.5, color: "#C9C2AF", marginBottom: 12, lineHeight: 1.5 }}>
+          Tap the map to place it, drag to adjust. Pick a corner or a park entrance rather than your
+          front door.
+        </p>
+
+        <div
+          ref={nodeRef}
+          style={{ height: 300, borderRadius: 14, overflow: "hidden", background: "#1B2A20" }}
+        />
+
+        <p className="mono" style={{ fontSize: 10, color: "#6B8577", margin: "10px 0 14px", textAlign: "center" }}>
+          {picked ? `${picked.lat.toFixed(4)}, ${picked.lng.toFixed(4)}` : "No pin placed yet"}
+        </p>
+
+        <div style={{ display: "flex", gap: 8 }}>
+          <button
+            onClick={onCancel}
+            className="btn-press"
+            style={{
+              flex: 1,
+              background: "transparent",
+              border: "1px solid #33513E",
+              color: "#C9C2AF",
+              borderRadius: 12,
+              padding: "11px 0",
+              cursor: "pointer",
+              fontFamily: "'Work Sans', sans-serif",
+              fontSize: 14,
+            }}
+          >
+            Cancel
+          </button>
+          <button
+            onClick={() => picked && onConfirm(picked)}
+            disabled={!picked}
+            className="btn-press"
+            style={{
+              flex: 1,
+              background: picked ? "#E8A33D" : "#33513E",
+              border: "none",
+              color: picked ? "#16241C" : "#6B8577",
+              borderRadius: 12,
+              padding: "11px 0",
+              fontWeight: 600,
+              cursor: picked ? "pointer" : "default",
+              fontFamily: "'Work Sans', sans-serif",
+              fontSize: 14,
+            }}
+          >
+            Start walk here
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // A real OpenStreetMap view. Free, no API key, no billing account needed.
 function WalkMap({ me, others }) {
   const nodeRef = useRef(null);
@@ -244,13 +381,15 @@ export default function Gassi() {
 
   // Each phone gets its own permanent id, so two real devices are two real users.
   // The demo toggle just adds a second identity on this same phone for solo testing.
-  const viewer = deviceId ? (useDemoPhone ? deviceId + ":demo" : deviceId) : null;
+  // The demo identity gets its own distinct id rather than a suffix on yours, so the two
+  // never get confused with each other in request keys.
+  const viewer = deviceId ? (useDemoPhone ? "demo-" + deviceId : deviceId) : null;
 
   const isOut = Boolean(viewer && activeWalks[viewer]);
   const walkStart = viewer && activeWalks[viewer] ? activeWalks[viewer].startedAt : null;
   const [elapsed, setElapsed] = useState(0);
 
-  const myProfileFor = (id) => (id && id.endsWith(":demo") ? DEMO_USER : profile);
+  const myProfileFor = (id) => (id && id.startsWith("demo-") ? DEMO_USER : profile);
 
   useEffect(() => {
     let id = localStorage.getItem("gassi:deviceId");
@@ -315,7 +454,12 @@ export default function Gassi() {
       if (rErr) throw rErr;
       const reqMap = {};
       (reqs || []).forEach((r) => {
-        reqMap[`${r.target_id}_${r.requester_id}`] = {
+        const target = walkMap[r.target_id];
+        const createdAt = new Date(r.created_at).getTime();
+        // A request only counts for the walk it was made during. If the target isn't out,
+        // or their current walk started after the request, it's from a previous outing.
+        if (!target || createdAt < target.startedAt) return;
+        reqMap[`${r.target_id}|${r.requester_id}`] = {
           id: r.id,
           status: r.status,
           requesterOwner: r.requester_owner,
@@ -358,6 +502,8 @@ export default function Gassi() {
   const [coords, setCoords] = useState(null);
   const [geoError, setGeoError] = useState(null);
   const [reportingId, setReportingId] = useState(null);
+  const [pickingPin, setPickingPin] = useState(false);
+  const [pickerStart, setPickerStart] = useState(null);
   const [reportReason, setReportReason] = useState(REPORT_REASONS[0]);
   const [reportNote, setReportNote] = useState("");
   const [reportDone, setReportDone] = useState(false);
@@ -455,13 +601,36 @@ export default function Gassi() {
     };
   }, [isOut, locationMode, viewer]);
 
-  const startWalk = async () => {
+  // In pin mode we open the picker first; in live mode GPS has to track you anyway.
+  const beginWalk = async () => {
+    if (!profileComplete) {
+      setDraftProfile(profile);
+      setEditingProfile(true);
+      return;
+    }
+    if (locationMode === "pin") {
+      // Get a rough starting position just to centre the map, then let them choose.
+      const c = await requestLocation("pin");
+      setPickerStart(c);
+      setPickingPin(true);
+      return;
+    }
+    startWalk(null);
+  };
+
+  const startWalk = async (chosenCoords) => {
     if (!viewer) return;
     const me = myProfileFor(viewer);
     setJustDropped(true);
     setTimeout(() => setJustDropped(false), 1400);
-    const c = await requestLocation(locationMode);
+    const c = chosenCoords || (locationMode === "live" ? await requestLocation("live") : null);
+    if (c) setCoords(c);
     try {
+      // A new walk is a clean slate: clear any requests left over from previous walks,
+      // so yesterday's "accepted" doesn't make it look like someone is already joining.
+      await supabase.from("requests").delete().eq("target_id", viewer);
+      await supabase.from("requests").delete().eq("requester_id", viewer);
+
       const { error } = await supabase.from("walks").upsert({
         id: viewer,
         owner: me.owner,
@@ -540,27 +709,28 @@ export default function Gassi() {
         .filter((k) => {
           const r = requestsMap[k];
           if (r.status !== "accepted") return false;
-          const iAmTarget = k.startsWith(`${viewer}_`);
-          const iAmRequester = k.endsWith(`_${viewer}`);
+          const iAmTarget = k.startsWith(`${viewer}|`);
+          const iAmRequester = k.endsWith(`|${viewer}`);
           if (!iAmTarget && !iAmRequester) return false;
 
           // Work out who the other person is, and only show them if they're still out.
           const otherId = iAmTarget
-            ? k.slice(`${viewer}_`.length)
-            : k.slice(0, k.length - `_${viewer}`.length);
+            ? k.slice(`${viewer}|`.length)
+            : k.slice(0, k.length - `|${viewer}`.length);
           return Boolean(activeWalks[viewer]) && Boolean(activeWalks[otherId]);
         })
         .map((k) => {
-          const r = requestsMap[k];
-          const iAmTarget = k.startsWith(`${viewer}_`);
+          const iAmTarget = k.startsWith(`${viewer}|`);
           const otherId = iAmTarget
-            ? k.slice(`${viewer}_`.length)
-            : k.slice(0, k.length - `_${viewer}`.length);
+            ? k.slice(`${viewer}|`.length)
+            : k.slice(0, k.length - `|${viewer}`.length);
           const other = activeWalks[otherId];
           return {
             key: k,
-            name: other ? other.owner : r.requesterOwner,
-            dog: other ? other.dog : r.requesterDog,
+            name: other ? other.owner : "Someone",
+            dog: other ? other.dog : "their dog",
+            // If they asked to join me, they're joining me. If I asked them, I'm joining them.
+            theyJoinedMe: iAmTarget,
           };
         })
     : [];
@@ -568,7 +738,7 @@ export default function Gassi() {
   // Requests sent TO me that are still pending
   const incomingKeys = viewer
     ? Object.keys(requestsMap).filter(
-        (k) => k.startsWith(`${viewer}_`) && requestsMap[k].status === "sent"
+        (k) => k.startsWith(`${viewer}|`) && requestsMap[k].status === "sent"
       )
     : [];
   const nearbyIds = Object.keys(activeWalks).filter(
@@ -981,19 +1151,12 @@ export default function Gassi() {
               </div>
               <p style={{ fontSize: 11, color: COLORS.muted, marginBottom: 18, lineHeight: 1.5 }}>
                 {locationMode === "pin"
-                  ? "Your position is saved once, when you head out. It won't follow you."
-                  : "Your position updates as you walk, until you end the walk."}
+                  ? "You choose exactly where the pin goes. It stays there and won't follow you."
+                  : "Your real position updates as you walk, until you end the walk."}
               </p>
 
               <button
-                onClick={() => {
-                  if (!profileComplete) {
-                    setDraftProfile(profile);
-                    setEditingProfile(true);
-                    return;
-                  }
-                  startWalk();
-                }}
+                onClick={beginWalk}
                 className="btn-press"
                 style={{
                   width: "100%",
@@ -1141,7 +1304,8 @@ export default function Gassi() {
                     <PawPrint size={15} color={COLORS.bg} />
                   </div>
                   <p style={{ fontSize: 13.5 }}>
-                    <span style={{ fontWeight: 600 }}>{c.name}</span> and {c.dog} are joining you
+                    <span style={{ fontWeight: 600 }}>{c.name}</span> and {c.dog}{" "}
+                    {c.theyJoinedMe ? "are joining you" : "— you're joining them"}
                   </p>
                 </div>
               ))}
@@ -1259,7 +1423,7 @@ export default function Gassi() {
             <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
               {nearbyIds.map((id) => {
                 const w = activeWalks[id];
-                const reqKey = `${id}_${viewer}`;
+                const reqKey = `${id}|${viewer}`;
                 const status = requestsMap[reqKey]?.status;
                 const mins = Math.max(1, Math.floor((Date.now() - w.startedAt) / 60000));
                 const outLabel = mins >= 60 ? `${Math.floor(mins / 60)}h ${mins % 60}m` : `${mins}m`;
@@ -1361,6 +1525,17 @@ export default function Gassi() {
             </div>
           )}
         </div>
+
+        {pickingPin && (
+          <PinPicker
+            initial={pickerStart}
+            onCancel={() => setPickingPin(false)}
+            onConfirm={(c) => {
+              setPickingPin(false);
+              startWalk(c);
+            }}
+          />
+        )}
 
         {/* Report / block sheet */}
         {reportingId && (
