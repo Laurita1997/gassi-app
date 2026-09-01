@@ -43,6 +43,66 @@ const COLORS = {
   line: "#33513E",
 };
 
+// Shrink a photo before upload: 256px, JPEG. Keeps rows small and loading fast.
+async function compressImage(file, max = 256) {
+  const dataUrl = await new Promise((res, rej) => {
+    const r = new FileReader();
+    r.onload = () => res(r.result);
+    r.onerror = rej;
+    r.readAsDataURL(file);
+  });
+  const img = await new Promise((res, rej) => {
+    const i = new Image();
+    i.onload = () => res(i);
+    i.onerror = rej;
+    i.src = dataUrl;
+  });
+  const scale = Math.min(1, max / Math.max(img.width, img.height));
+  const w = Math.round(img.width * scale);
+  const h = Math.round(img.height * scale);
+  const canvas = document.createElement("canvas");
+  canvas.width = w;
+  canvas.height = h;
+  canvas.getContext("2d").drawImage(img, 0, 0, w, h);
+  return canvas.toDataURL("image/jpeg", 0.7);
+}
+
+// A small round avatar, falling back to a paw when there's no photo.
+function Avatar({ src, size = 40, ring = "#7FA8B7" }) {
+  if (src) {
+    return (
+      <img
+        src={src}
+        alt=""
+        style={{
+          width: size,
+          height: size,
+          borderRadius: "9999px",
+          objectFit: "cover",
+          flexShrink: 0,
+          border: `2px solid ${ring}`,
+        }}
+      />
+    );
+  }
+  return (
+    <div
+      style={{
+        width: size,
+        height: size,
+        borderRadius: "9999px",
+        background: ring,
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        flexShrink: 0,
+      }}
+    >
+      <PawPrint size={size * 0.45} color="#16241C" />
+    </div>
+  );
+}
+
 // A map you tap to place your own pin, instead of broadcasting exact GPS.
 function PinPicker({ initial, onConfirm, onCancel }) {
   const nodeRef = useRef(null);
@@ -106,7 +166,7 @@ function PinPicker({ initial, onConfirm, onCancel }) {
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
-        zIndex: 70,
+        zIndex: 3200,
         padding: 18,
       }}
     >
@@ -281,7 +341,7 @@ function WalkMap({ me, others }) {
           position: "absolute",
           right: 10,
           bottom: 26,
-          zIndex: 500,
+          zIndex: 400,
           background: "#16241C",
           border: "1px solid #33513E",
           color: "#F2EDE1",
@@ -353,7 +413,7 @@ function Pulse({ color = COLORS.amber, size = 10 }) {
   );
 }
 
-const DEFAULT_PROFILE = { owner: "", dog: "", breed: "", age: "", agreed: false };
+const DEFAULT_PROFILE = { owner: "", dog: "", breed: "", age: "", agreed: false, photo: null, dogPhoto: null };
 const DEMO_USER = { id: "sofia", owner: "Sofia", dog: "Nino", breed: "Mini Poodle", age: "31", note: "Chill pace, coffee stop halfway" };
 const MIN_AGE = 18;
 // Walks auto-expire after 1 hour, so location sharing never runs on unnoticed.
@@ -435,6 +495,8 @@ export default function Gassi() {
           lat: w.lat,
           lng: w.lng,
           live: w.live,
+          photo: w.photo,
+          dogPhoto: w.dog_photo,
           startedAt,
         };
       });
@@ -641,6 +703,8 @@ export default function Gassi() {
         lat: c ? c.lat : null,
         lng: c ? c.lng : null,
         live: locationMode === "live",
+        photo: me.photo || null,
+        dog_photo: me.dogPhoto || null,
       });
       if (error) throw error;
       await refreshShared();
@@ -790,6 +854,13 @@ export default function Gassi() {
           background: #1B2A20;
           font-family: 'Work Sans', sans-serif;
         }
+        /* Keep Leaflet's internal layers from stacking above our dialogs. */
+        .leaflet-pane,
+        .leaflet-top,
+        .leaflet-bottom,
+        .leaflet-control {
+          z-index: 1 !important;
+        }
         .leaflet-control-attribution {
           background: rgba(255,255,255,0.8) !important;
           font-size: 9px !important;
@@ -890,7 +961,7 @@ export default function Gassi() {
               display: "flex",
               alignItems: "center",
               justifyContent: "center",
-              zIndex: 50,
+              zIndex: 3000,
               padding: 24,
             }}
           >
@@ -935,6 +1006,40 @@ export default function Gassi() {
                   />
                 </div>
               ))}
+
+              {/* Photos so people know who they're meeting */}
+              <p style={{ fontSize: 11, color: COLORS.creamDim, marginBottom: 8 }}>Photos</p>
+              <div style={{ display: "flex", gap: 14, marginBottom: 16 }}>
+                {[
+                  { key: "photo", label: "You" },
+                  { key: "dogPhoto", label: "Your dog" },
+                ].map((f) => (
+                  <label
+                    key={f.key}
+                    style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 6, cursor: "pointer" }}
+                  >
+                    <Avatar src={draftProfile[f.key]} size={58} ring={COLORS.line} />
+                    <span style={{ fontSize: 10.5, color: COLORS.sky, textDecoration: "underline" }}>
+                      {draftProfile[f.key] ? "Change" : "Add"} {f.label.toLowerCase()}
+                    </span>
+                    <input
+                      type="file"
+                      accept="image/*"
+                      style={{ display: "none" }}
+                      onChange={async (e) => {
+                        const file = e.target.files && e.target.files[0];
+                        if (!file) return;
+                        try {
+                          const small = await compressImage(file);
+                          setDraftProfile((d) => ({ ...d, [f.key]: small }));
+                        } catch (err) {
+                          setSaveError(true);
+                        }
+                      }}
+                    />
+                  </label>
+                ))}
+              </div>
 
               {draftProfile.age && Number(draftProfile.age) < MIN_AGE && (
                 <p style={{ fontSize: 11.5, color: COLORS.amber, marginBottom: 10 }}>
@@ -1076,9 +1181,18 @@ export default function Gassi() {
                 alignItems: "center",
                 justifyContent: "center",
                 flexShrink: 0,
+                overflow: "hidden",
               }}
             >
-              <PawPrint size={14} color={COLORS.bg} />
+              {myProfileFor(viewer).photo ? (
+                <img
+                  src={myProfileFor(viewer).photo}
+                  alt=""
+                  style={{ width: "100%", height: "100%", objectFit: "cover" }}
+                />
+              ) : (
+                <PawPrint size={14} color={COLORS.bg} />
+              )}
             </div>
             <p style={{ fontSize: 12.5, color: COLORS.creamDim }}>
               {profileComplete || myProfileFor(viewer).owner ? (
@@ -1331,20 +1445,20 @@ export default function Gassi() {
                     gap: 12,
                   }}
                 >
-                  <div
-                    style={{
-                      width: 40,
-                      height: 40,
-                      borderRadius: "9999px",
-                      background: COLORS.sky,
-                      display: "flex",
-                      alignItems: "center",
-                      justifyContent: "center",
-                      flexShrink: 0,
-                    }}
-                  >
-                    <PawPrint size={18} color={COLORS.bg} />
-                  </div>
+                  {(() => {
+                    const requesterId = key.slice(`${viewer}|`.length);
+                    const rw = activeWalks[requesterId];
+                    return (
+                      <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
+                        <Avatar src={rw && rw.photo} size={40} ring={COLORS.sky} />
+                        {rw && rw.dogPhoto && (
+                          <div style={{ marginLeft: -14 }}>
+                            <Avatar src={rw.dogPhoto} size={32} ring={COLORS.amber} />
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })()}
                   <div style={{ flex: 1 }}>
                     <p style={{ fontSize: 13.5, fontWeight: 500 }}>
                       {req.requesterOwner} wants to join with {req.requesterDog}
@@ -1441,19 +1555,29 @@ export default function Gassi() {
                       <div style={{ marginTop: 3 }}>
                         <Pulse size={9} color={COLORS.amber} />
                       </div>
-                      <div>
-                        <p style={{ fontSize: 14.5, fontWeight: 600 }}>
-                          {w.owner} · <span style={{ fontWeight: 400, color: COLORS.creamDim }}>{w.dog}</span>
-                        </p>
-                        <p style={{ fontSize: 12, color: COLORS.creamDim, marginTop: 2 }}>{w.breed}</p>
-                        <p className="mono" style={{ fontSize: 10.5, color: COLORS.muted, marginTop: 6 }}>
-                          out {outLabel}
-                          {(() => {
-                            const d = fmtDistance(distanceKm(coords, w));
-                            return d ? ` · ${d} away` : "";
-                          })()}
-                          {w.live ? " · live" : ""}
-                        </p>
+                      <div style={{ display: "flex", gap: 10, flex: 1 }}>
+                        <div style={{ display: "flex", gap: -6 }}>
+                          <Avatar src={w.photo} size={44} ring={COLORS.sky} />
+                          {w.dogPhoto && (
+                            <div style={{ marginLeft: -12 }}>
+                              <Avatar src={w.dogPhoto} size={36} ring={COLORS.amber} />
+                            </div>
+                          )}
+                        </div>
+                        <div>
+                          <p style={{ fontSize: 14.5, fontWeight: 600 }}>
+                            {w.owner} · <span style={{ fontWeight: 400, color: COLORS.creamDim }}>{w.dog}</span>
+                          </p>
+                          <p style={{ fontSize: 12, color: COLORS.creamDim, marginTop: 2 }}>{w.breed}</p>
+                          <p className="mono" style={{ fontSize: 10.5, color: COLORS.muted, marginTop: 6 }}>
+                            out {outLabel}
+                            {(() => {
+                              const d = fmtDistance(distanceKm(coords, w));
+                              return d ? ` · ${d} away` : "";
+                            })()}
+                            {w.live ? " · live" : ""}
+                          </p>
+                        </div>
                       </div>
                     </div>
 
@@ -1548,7 +1672,7 @@ export default function Gassi() {
               display: "flex",
               alignItems: "center",
               justifyContent: "center",
-              zIndex: 60,
+              zIndex: 3100,
               padding: 24,
             }}
           >
